@@ -1,0 +1,7 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+PyJWT>=2.8.0
+
+# Memory sleep (vector DB + KG) and RAG tools
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
