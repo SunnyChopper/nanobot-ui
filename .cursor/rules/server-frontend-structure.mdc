@@ -1,0 +1,18 @@
+---
+description: Backend handlers/services and frontend API + Atomic Design layout
+alwaysApply: true
+---
+
+# Server and frontend structure
+
+## Backend (server/)
+
+- **Routes** (`routes.py`): Only register endpoints → handler functions. No business logic.
+- **Handlers** (`handlers/*.py`): HTTP-only — read request, call services from `request.app.state`, return models or raise `HTTPException`.
+- **Services** (`services/`): Business logic and I/O. Name **concrete implementations** by backing (e.g. `NanobotSessionService`), not `*Impl`. Interfaces stay as protocols/ABCs (e.g. `SessionService`). Wire implementations in `app.py`.
+
+## Frontend (frontend/src/)
+
+- **API**: Domain modules under `api/` (e.g. `sessions.ts`, `config.ts`, `memory.ts`). Shared transport in `http.ts`. `client.ts` re-exports so `import { … } from '../api/client'` works. **Status/config** live in `config.ts`; memory in `memory.ts` — keep exports in the correct domain file.
+- **Types**: `api/types.ts` and optionally `api/types/*.ts`; barrel so existing imports keep working.
+- **Components**: Atomic Design — `atoms/`, `molecules/`, `organisms/`, `pages/`. Put new UI in the smallest layer that fits; pages compose organisms and own state/React Query.

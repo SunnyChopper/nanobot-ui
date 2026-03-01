@@ -1,0 +1,13 @@
+---
+description: When using browser/Playwright MCP tools — use headless for docs, remote debugging for logins (e.g. X)
+alwaysApply: true
+---
+
+# Browser automation (Playwright / cursor-ide-browser)
+
+When using browser tools (Playwright MCP or cursor-ide-browser):
+
+- **Headless** — Use for documentation research, simple page fetches, and scraping. No login or session needed.
+- **Remote debugging** — Use when logging into an account (e.g. X/Twitter, GitHub) or when the site depends on cookies/session. Prefer remote debugging for login flows and authenticated actions.
+
+Do not use remote debugging for read-only documentation tasks; use headless instead.

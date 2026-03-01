@@ -1,0 +1,12 @@
+---
+description: Core engine; minimize edits and document changes in docs for merge conflict resolution
+globs: nanobot/**/*.py
+alwaysApply: false
+---
+
+# nanobot core
+
+Files under `nanobot/` are the **core engine** maintained by the external community.
+
+- **Minimize edits** to reduce merge conflicts when pulling upstream.
+- If you must change something here, **document what and why** in `docs/reference/` (e.g. architecture.md or a short overrides note) so the next merge is easier to resolve.

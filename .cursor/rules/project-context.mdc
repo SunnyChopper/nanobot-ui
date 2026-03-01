@@ -1,0 +1,12 @@
+---
+description: Follow project cognitive framework; prefer extending via config and workspace
+alwaysApply: true
+---
+
+# Project context
+
+When working in this repository:
+
+1. **Follow [CLAUDE.md](CLAUDE.md)** at the repo root for identity, self-improvement loop, and where to look.
+2. **Prefer extending** via config, workspace bootstrap/skills, and `server/` / `frontend/`; **avoid editing `nanobot/`** unless necessary.
+3. For how to add behavior without touching the core engine, see [docs/output/extension-points.md](docs/output/extension-points.md).
