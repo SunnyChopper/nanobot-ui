@@ -1,6 +1,8 @@
 # Sync with main (stash–pull–reapply)
 
-Run the full stash–pull–reapply workflow to get the latest changes from `origin/main`, with context offloading so merge conflicts can be resolved using the purpose of your local changes.
+Run the full stash–pull–reapply workflow to get the latest changes from **`upstream/main`** (the original upstream repo), with context offloading so merge conflicts can be resolved using the purpose of your local changes.
+
+**Setup:** Ensure the `upstream` remote points to the source repo (e.g. the original `nanobot` repo). Your fork is `origin`; you pull from `upstream` and push to `origin`.
 
 You may add extra context after the command (e.g. `/sync-main focus on keeping the new desktop tool changes`). Use that context when writing the merge-context doc and when resolving conflicts.
 
@@ -10,11 +12,11 @@ Follow these steps in order.
 
 ### 1. Check state
 
-Run `git status`. If the working tree is clean and the branch is already up to date with `origin/main`, report "Already up to date" and stop. Otherwise continue.
+Run `git status`. If the working tree is clean and the branch is already up to date with `upstream/main`, report "Already up to date" and stop. Otherwise continue.
 
 ### 2. Capture context (if there are uncommitted or local changes)
 
-If there are uncommitted changes (staged or unstaged) or local commits not on `origin/main`:
+If there are uncommitted changes (staged or unstaged) or local commits not on `upstream/main`:
 
 - Create the directory `.claude/merges/` if it does not exist.
 - Create or update a merge-context file there. Name it by date (and optionally time) so each sync has a traceable doc, e.g.:
@@ -52,13 +54,13 @@ git stash push -u -m "sync-main YYYY-MM-DD"
 
 Use the same date (and time if you used it in the filename). `-u` includes untracked files so nothing is lost.
 
-### 4. Pull main
+### 4. Pull main from upstream
 
 Run:
 
 ```bash
-git fetch origin main
-git merge origin/main
+git fetch upstream main
+git merge upstream/main
 ```
 
 - If the merge completes with no conflicts, go to step 5.
