@@ -863,8 +863,7 @@ Use `toolTimeout` to override the default 30s per-call timeout for slow servers:
 
 MCP tools are automatically discovered and registered on startup. The LLM can use them alongside built-in tools — no extra configuration needed.
 
-
-
+For browser automation, you can add [Playwright MCP](https://github.com/microsoft/playwright-mcp) (e.g. `"playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] }` in `mcp_servers`). See [docs/output/playwright-mcp.md](docs/output/playwright-mcp.md) for details.
 
 ### Security
 

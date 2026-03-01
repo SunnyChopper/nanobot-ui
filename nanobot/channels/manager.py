@@ -30,6 +30,11 @@ class ChannelManager:
         self._dispatch_task: asyncio.Task | None = None
         
         self._init_channels()
+
+    def register_channel(self, name: str, channel: BaseChannel | Any) -> None:
+        """Register an additional channel (e.g. 'web' for server-injected delivery)."""
+        self.channels[name] = channel
+        logger.info(f"Registered channel: {name}")
     
     def _init_channels(self) -> None:
         """Initialize channels based on config."""

@@ -21,6 +21,7 @@ class CronSchedule:
 @dataclass
 class CronPayload:
     """What to do when the job runs."""
+    # system_event: dispatch by job.name (e.g. "memory_sleep").
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
     # Deliver response to channel

@@ -20,9 +20,14 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
         path_append: str = "",
+        use_sandbox: bool = False,
+        sandbox_image: str = "alpine:latest",
     ):
         self.timeout = timeout
         self.working_dir = working_dir
+        self.path_append = path_append
+        self.use_sandbox = use_sandbox
+        self.sandbox_image = sandbox_image or "alpine:latest"
         self.deny_patterns = deny_patterns or [
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
@@ -68,11 +73,75 @@ class ExecTool(Tool):
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
-        
+        if self.use_sandbox:
+            return await self._run_sandboxed(command, cwd)
         env = os.environ.copy()
         if self.path_append:
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
+        return await self._run_host(command, cwd, env)
 
+    async def _run_sandboxed(self, command: str, cwd: str) -> str:
+        """Run command inside a Docker container (no network, read-only except mounted workspace)."""
+        import shutil
+        if not shutil.which("docker"):
+            return "Error: Sandbox requested but Docker is not installed or not in PATH."
+        cwd_path = Path(cwd).resolve()
+        if not cwd_path.exists() or not cwd_path.is_dir():
+            return f"Error: Working directory does not exist: {cwd}"
+        # Mount workspace as /workspace in container; run with --rm, --network none
+        mount = f"{cwd_path}:/workspace"
+        # Escape for sh -c: wrap in single quotes, escape single quotes as '\''
+        safe_cmd = command.replace("'", "'\"'\"'")
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--network", "none",
+            "-v", mount,
+            "-w", "/workspace",
+            self.sandbox_image,
+            "sh", "-c", safe_cmd,
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *docker_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=self.timeout,
+                )
+            except asyncio.CancelledError:
+                process.kill()
+                try:
+                    await process.wait()
+                except Exception:
+                    pass
+                raise
+            except asyncio.TimeoutError:
+                process.kill()
+                return f"Error: Command timed out after {self.timeout} seconds (sandbox)"
+            output_parts = []
+            if stdout:
+                output_parts.append(stdout.decode("utf-8", errors="replace"))
+            if stderr:
+                stderr_text = stderr.decode("utf-8", errors="replace")
+                if stderr_text.strip():
+                    output_parts.append(f"STDERR:\n{stderr_text}")
+            if process.returncode != 0:
+                output_parts.append(f"\nExit code: {process.returncode}")
+            result = "\n".join(output_parts) if output_parts else "(no output)"
+            max_len = 10000
+            if len(result) > max_len:
+                result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
+            return result
+        except Exception as e:
+            return f"Error executing command in sandbox: {str(e)}"
+
+    async def _run_host(self, command: str, cwd: str, env: dict[str, str] | None = None) -> str:
+        """Run command on the host (current behavior)."""
+        if env is None:
+            env = dict(os.environ)
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -81,12 +150,18 @@ class ExecTool(Tool):
                 cwd=cwd,
                 env=env,
             )
-            
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
                     timeout=self.timeout
                 )
+            except asyncio.CancelledError:
+                process.kill()
+                try:
+                    await process.wait()
+                except Exception:
+                    pass
+                raise
             except asyncio.TimeoutError:
                 process.kill()
                 # Wait for the process to fully terminate so pipes are
@@ -96,29 +171,20 @@ class ExecTool(Tool):
                 except asyncio.TimeoutError:
                     pass
                 return f"Error: Command timed out after {self.timeout} seconds"
-            
             output_parts = []
-            
             if stdout:
                 output_parts.append(stdout.decode("utf-8", errors="replace"))
-            
             if stderr:
                 stderr_text = stderr.decode("utf-8", errors="replace")
                 if stderr_text.strip():
                     output_parts.append(f"STDERR:\n{stderr_text}")
-            
             if process.returncode != 0:
                 output_parts.append(f"\nExit code: {process.returncode}")
-            
             result = "\n".join(output_parts) if output_parts else "(no output)"
-            
-            # Truncate very long output
             max_len = 10000
             if len(result) > max_len:
                 result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
-            
             return result
-            
         except Exception as e:
             return f"Error executing command: {str(e)}"
 

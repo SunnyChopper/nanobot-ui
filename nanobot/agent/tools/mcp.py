@@ -1,6 +1,7 @@
 """MCP client: connects to MCP servers and wraps their tools as native nanobot tools."""
 
 import asyncio
+import os
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -63,8 +64,9 @@ async def connect_mcp_servers(
     for name, cfg in mcp_servers.items():
         try:
             if cfg.command:
+                merged_env = {**os.environ, **(cfg.env or {})}
                 params = StdioServerParameters(
-                    command=cfg.command, args=cfg.args, env=cfg.env or None
+                    command=cfg.command, args=cfg.args, env=merged_env
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif cfg.url:

@@ -55,11 +55,19 @@ class MemoryStore:
             return self.memory_file.read_text(encoding="utf-8")
         return ""
 
+    def read_history(self) -> str:
+        if self.history_file.exists():
+            return self.history_file.read_text(encoding="utf-8")
+        return ""
+
     def write_long_term(self, content: str) -> None:
         self.memory_file.write_text(content, encoding="utf-8")
 
     def append_history(self, entry: str) -> None:
+        content = self.read_history()
         with open(self.history_file, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n\n"):
+                f.write("\n\n")
             f.write(entry.rstrip() + "\n\n")
 
     def get_memory_context(self) -> str:

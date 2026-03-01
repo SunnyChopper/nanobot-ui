@@ -20,7 +20,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from nanobot import __version__, __logo__
 from nanobot.config.schema import Config
-from nanobot.utils.helpers import sync_workspace_templates
+from nanobot.utils.helpers import get_data_path, sync_workspace_templates
 
 app = typer.Typer(
     name="nanobot",
@@ -88,7 +88,7 @@ def _init_prompt_session() -> None:
     except Exception:
         pass
 
-    history_file = Path.home() / ".nanobot" / "history" / "cli_history"
+    history_file = get_data_path() / "history" / "cli_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _PROMPT_SESSION = PromptSession(
@@ -196,7 +196,93 @@ def onboard():
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
 
 
+def _create_workspace_templates(workspace: Path):
+    """Create default workspace template files."""
+    templates = {
+        "AGENTS.md": """# Agent Instructions
 
+You are a helpful AI assistant. Be concise, accurate, and friendly.
+
+## Guidelines
+
+- Always explain what you're doing before taking actions
+- Ask for clarification when the request is ambiguous
+- Use tools to help accomplish tasks
+- Remember important information in memory/MEMORY.md; past events are logged in memory/HISTORY.md
+
+## Tools available
+
+- File operations (read, write, edit, list)
+- Shell (exec)
+- Web (search, fetch)
+- Desktop control (mouse_move, mouse_click, mouse_position, keyboard_type, screenshot, screenshot_region, locate_on_screen, click_image) when pyautogui is available
+- Messaging (message), background tasks (spawn), scheduled reminders (cron)
+""",
+        "SOUL.md": """# Soul
+
+I am nanobot, a lightweight AI assistant.
+
+## Personality
+
+- Helpful and friendly
+- Concise and to the point
+- Curious and eager to learn
+
+## Values
+
+- Accuracy over speed
+- User privacy and safety
+- Transparency in actions
+""",
+        "USER.md": """# User
+
+Information about the user goes here.
+
+## Preferences
+
+- Communication style: (casual/formal)
+- Timezone: (your timezone)
+- Language: (your preferred language)
+""",
+    }
+    
+    for filename, content in templates.items():
+        file_path = workspace / filename
+        if not file_path.exists():
+            file_path.write_text(content)
+            console.print(f"  [dim]Created {filename}[/dim]")
+    
+    # Create memory directory and MEMORY.md
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    memory_file = memory_dir / "MEMORY.md"
+    if not memory_file.exists():
+        memory_file.write_text("""# Long-term Memory
+
+This file stores important information that should persist across sessions.
+
+## User Information
+
+(Important facts about the user)
+
+## Preferences
+
+(User preferences learned over time)
+
+## Important Notes
+
+(Things to remember)
+""")
+        console.print("  [dim]Created memory/MEMORY.md[/dim]")
+    
+    history_file = memory_dir / "HISTORY.md"
+    if not history_file.exists():
+        history_file.write_text("")
+        console.print("  [dim]Created memory/HISTORY.md[/dim]")
+
+    # Create skills directory for custom user skills
+    skills_dir = workspace / "skills"
+    skills_dir.mkdir(exist_ok=True)
 
 
 def _make_provider(config: Config):
@@ -234,6 +320,8 @@ def _make_provider(config: Config):
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
+        max_retries=getattr(config.agents.defaults, "max_llm_retries", 3),
+        retry_backoff_base_seconds=getattr(config.agents.defaults, "retry_backoff_base_seconds", 2),
     )
 
 
@@ -285,11 +373,27 @@ def gateway(
         memory_window=config.agents.defaults.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
+        python_inline_config=config.tools.python_inline,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        tool_timeout_seconds=getattr(config.tools, "tool_timeout_seconds", 0) or 0,
+        mcp_guidance=config.tools.mcp_guidance,
+        cua_auto_approve=getattr(config.tools, "cua_auto_approve", False),
+        screenshot_follow_up_text=getattr(config.tools, "screenshot_follow_up_text", None) or None,
+        system_prompt_max_chars=getattr(config.agents.defaults, "system_prompt_max_chars", 0) or 0,
+        memory_section_max_chars=getattr(config.agents.defaults, "memory_section_max_chars", 0) or 0,
+        section_order=getattr(config.agents.defaults, "system_prompt_section_order", None) or None,
+        history_max_chars=getattr(config.agents.defaults, "history_max_chars", 0) or 0,
+        computer_use_config=getattr(config.tools, "computer_use", None),
+        computer_use_confirm_callback=None,
+        computer_use_api_key=(
+            (os.environ.get("GEMINI_API_KEY") or getattr(config.tools.computer_use, "api_key", None) or config.get_api_key("gemini/gemini-3-flash-preview") or None)
+            if getattr(config.tools, "computer_use", None) and getattr(config.tools.computer_use, "enabled", False)
+            else None
+        ),
     )
     
     # Set cron callback (needs agent)
@@ -444,9 +548,25 @@ def agent(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
+        python_inline_config=config.tools.python_inline,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        tool_timeout_seconds=getattr(config.tools, "tool_timeout_seconds", 0) or 0,
+        mcp_guidance=config.tools.mcp_guidance,
+        cua_auto_approve=getattr(config.tools, "cua_auto_approve", False),
+        screenshot_follow_up_text=getattr(config.tools, "screenshot_follow_up_text", None) or None,
+        system_prompt_max_chars=getattr(config.agents.defaults, "system_prompt_max_chars", 0) or 0,
+        memory_section_max_chars=getattr(config.agents.defaults, "memory_section_max_chars", 0) or 0,
+        section_order=getattr(config.agents.defaults, "system_prompt_section_order", None) or None,
+        history_max_chars=getattr(config.agents.defaults, "history_max_chars", 0) or 0,
+        computer_use_config=getattr(config.tools, "computer_use", None),
+        computer_use_confirm_callback=None,
+        computer_use_api_key=(
+            (os.environ.get("GEMINI_API_KEY") or getattr(config.tools.computer_use, "api_key", None) or config.get_api_key("gemini/gemini-3-flash-preview") or None)
+            if getattr(config.tools, "computer_use", None) and getattr(config.tools.computer_use, "enabled", False)
+            else None
+        ),
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -679,7 +799,7 @@ def _get_bridge_dir() -> Path:
     import subprocess
     
     # User's bridge location
-    user_bridge = Path.home() / ".nanobot" / "bridge"
+    user_bridge = get_data_path() / "bridge"
     
     # Check if already built
     if (user_bridge / "dist" / "index.js").exists():
@@ -937,6 +1057,13 @@ def cron_run(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        computer_use_config=getattr(config.tools, "computer_use", None),
+        computer_use_confirm_callback=None,
+        computer_use_api_key=(
+            (os.environ.get("GEMINI_API_KEY") or getattr(config.tools.computer_use, "api_key", None) or config.get_api_key("gemini/gemini-3-flash-preview") or None)
+            if getattr(config.tools, "computer_use", None) and getattr(config.tools.computer_use, "enabled", False)
+            else None
+        ),
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

@@ -226,6 +226,13 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
+    memory_model: str = "gpt-oss-120b"  # Model for web-triggered memory writes; set "" to disable
+    max_llm_retries: int = 3  # Retries for LLM stream/completion on transient errors
+    retry_backoff_base_seconds: int = 2  # Exponential backoff base (2^attempt * this)
+    system_prompt_max_chars: int = 0  # Cap assembled system prompt (0 = no limit)
+    memory_section_max_chars: int = 0  # Cap the Memory section when injected
+    system_prompt_section_order: list[str] = Field(default_factory=list)  # Section ids order; empty = default
+    history_max_chars: int = 0  # Cap total history content length (0 = no limit)
 
 
 class AgentsConfig(Base):
@@ -277,6 +284,12 @@ class GatewayConfig(Base):
     host: str = "0.0.0.0"
     port: int = 18790
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    log_format: str = "text"  # "text" | "json" – JSON for ELK/Datadog aggregation
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_seconds: float = 60.0
+    webhook_secret: str = ""
+    auth_enabled: bool = False
+    jwt_secret: str = ""
 
 
 class WebSearchConfig(Base):
@@ -297,6 +310,16 @@ class ExecToolConfig(Base):
 
     timeout: int = 60
     path_append: str = ""
+    use_sandbox: bool = False
+    sandbox_image: str = "alpine:latest"
+
+
+class PythonInlineConfig(BaseModel):
+    """Inline Python execution tool (run_python): run code via python -c with optional LLM safety check."""
+    enabled: bool = True
+    timeout: int = 30
+    safety_check: bool = True
+    safety_model: str = ""
 
 
 class MCPServerConfig(Base):
@@ -310,13 +333,91 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
 
 
+class MemorySleepConfig(BaseModel):
+    """Memory sleep (scheduled consolidation into vector DB and knowledge graph)."""
+    enabled: bool = True
+    schedule: str = "0 2 * * *"
+    archive_threshold_bytes: int = 200_000
+
+
+class KgDedupConfig(BaseModel):
+    """Knowledge graph deduplication."""
+    enabled: bool = False
+    schedule: str = "0 3 * * *"
+    kg_dedup_model: str = ""
+    llm_batch_size: int = 20
+    batch_size: int = 256
+
+
+class ComputerUseLearningConfig(Base):
+    """Self-improvement for computer use: log outcomes and optionally retrieve similar past tasks as hints."""
+
+    enabled: bool = False
+    """When True, log each run to episodes file and enable similar-task retrieval for hints."""
+    episodes_path: str | None = None
+    """Workspace-relative path for JSONL episodes (e.g. memory/computer_use_episodes.jsonl). If None, use memory/computer_use_episodes.jsonl."""
+    retrieval_max_hints: int = 3
+    """Max number of similar past episodes to inject as hints (0 = no retrieval)."""
+    retrieval_min_similarity: float = 0.0
+    """Reserved for future embedding threshold; token-overlap retrieval ignores this."""
+
+
+class ComputerUseConfig(Base):
+    """Computer use tool (Gemini 2.5 computer use, etc.): screenshot → model → actions → execute."""
+
+    enabled: bool = False
+    provider: str = "gemini"
+    model: str | None = None  # Default for Gemini: gemini-3-flash-preview
+    max_steps_per_task: int = 15
+    dry_run: bool = False
+    confirm_destructive: bool = True
+    api_key: str = ""  # Override; if empty, use providers.gemini.api_key
+    exclude_open_web_browser: bool = True
+    """When True (default), model uses click/type for desktop tasks (e.g. Open Notepad). Set False to allow open_web_browser for browser tasks."""
+    prefer_keyboard_shortcuts: bool = True
+    """When True (default), instruct the model to prefer keyboard shortcuts and key presses; use mouse clicks only when necessary."""
+    allow_multi_action_turn: bool = True
+    """When True (default), allow the model to return a short sequence of actions in one turn (e.g. click then type) when the next steps are clear."""
+    post_action_delay_ms: int = 400
+    """Delay in ms after executing actions before capturing the next screenshot (0 = no delay). Lets the UI update before the next step."""
+    use_conversation_history: bool = False
+    """When True, pass prior turns (user + model) to the API so the model sees what it suggested and the new screenshot. Reduces redundant steps; increases request size."""
+    use_internal_run_memory: bool = True
+    """When True (default), pass actions already taken this run to the provider so the model does not repeat them (reduces loops and cost)."""
+    exclusive_desktop: bool = True
+    """When True (default), only computer_use is registered for desktop; legacy tools (screenshot, mouse_click, etc.) are not registered. When False, both computer_use and legacy desktop tools are available."""
+    learning: ComputerUseLearningConfig | None = None
+    """Optional self-improvement: outcome logging and similar-task retrieval. When None, learning is disabled."""
+    repetition_same_kind_exit_threshold: int = 5
+    """Exit when this many consecutive same-kind actions (e.g. scroll_at) and screen unchanged for last 2 steps. 0 = disable same-kind exit."""
+    repetition_same_kind_hint_threshold: int = 4
+    """When same-kind streak >= this, add a hint to the model (e.g. 'The last N actions were all scroll_at...')."""
+    repetition_oscillation_window: int = 0
+    """If > 0, enable oscillation detection over this many recent actions; when alternating A-B-A-B is detected, add a hint. 0 = disabled."""
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    python_inline: PythonInlineConfig = Field(default_factory=PythonInlineConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    mcp_guidance: dict[str, str] = Field(default_factory=dict)
+    """Optional per-MCP-server guidance (server name → markdown). Injected into system prompt as "MCP tool guidance" section."""
+    tool_policy: dict[str, str] = Field(default_factory=dict)
+    """Per-tool execution policy. Values: "auto" | "ask" | "deny".
+    Tools not listed use built-in defaults (read-only → auto, write/exec → ask, mcp_* → ask)."""
+    tool_timeout_seconds: int = 0
+    """Max seconds per tool execution (0 = no timeout). Prevents long-running MCP tools from hanging the UI."""
+    cua_auto_approve: bool = False
+    """When True, screenshot/mouse/keyboard run without approval; run_python is validated by a fast Groq model and auto-approved if safe (pyautogui-only)."""
+    cua_safety_model: str = "llama-3.1-8b-instant"
+    """Model id for CUA inline-Python safety check (Groq). Used only when cua_auto_approve is True."""
+    screenshot_follow_up_text: str | None = None
+    """Optional text injected after a screenshot tool result. When set, overrides the default (TOOLS.md-aligned) guidance. Use to customize desktop workflow per deployment."""
+    computer_use: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
 
 
 class Config(BaseSettings):
@@ -327,11 +428,17 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    memory_sleep: MemorySleepConfig = Field(default_factory=MemorySleepConfig)
+    kg_dedup: KgDedupConfig = Field(default_factory=KgDedupConfig)
 
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        """Get expanded workspace path. Uses NANOBOT_HOME when default workspace is set."""
+        raw = self.agents.defaults.workspace
+        if raw == "~/.nanobot/workspace":
+            from nanobot.utils.helpers import get_workspace_path
+            return get_workspace_path()
+        return Path(raw).expanduser()
 
     def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""

@@ -1,57 +1,137 @@
 """Context builder for assembling agent prompts."""
 
+from __future__ import annotations
+
 import base64
 import mimetypes
 import platform
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+# Default order of system prompt sections. When config provides system_prompt_section_order,
+# only sections in that list are included, in that order; unknown names are ignored.
+DEFAULT_SECTION_ORDER = [
+    "identity",
+    "bootstrap",
+    "memory",
+    "always_skills",
+    "requested_skills",
+    "skills_summary",
+    "workflow",
+    "mcp_guidance",
+    "computer_use_guidance",
+]
+
 
 class ContextBuilder:
-    """Builds the context (system prompt + messages) for the agent."""
-    
+    """
+    Builds the context (system prompt + messages) for the agent.
+    Assembles bootstrap files, memory, skills, and conversation history.
+    Section order and inclusion can be overridden via section_order.
+    """
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    
-    def __init__(self, workspace: Path):
+
+    def __init__(
+        self,
+        workspace: Path,
+        mcp_guidance: dict[str, str] | None = None,
+        *,
+        system_prompt_max_chars: int = 0,
+        memory_section_max_chars: int = 0,
+        section_order: list[str] | None = None,
+        history_max_chars: int = 0,
+    ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
-        parts = [self._get_identity()]
+        self.workflow_summary_callback: Callable[[], str] | None = None
+        self.mcp_guidance: dict[str, str] = mcp_guidance or {}
+        self.computer_use_guidance: str | None = None
+        self.system_prompt_max_chars = system_prompt_max_chars
+        self.memory_section_max_chars = memory_section_max_chars
+        self.section_order = section_order if section_order else None
+        self.history_max_chars = history_max_chars
 
+    def _build_section_contents(self, skill_names: list[str] | None) -> dict[str, str]:
+        """Build all section contents keyed by section id."""
+        sections: dict[str, str] = {}
+        sections["identity"] = self._get_identity()
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
-
+            sections["bootstrap"] = bootstrap
         memory = self.memory.get_memory_context()
         if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            if self.memory_section_max_chars > 0 and len(memory) > self.memory_section_max_chars:
+                suffix = "\n\n... [truncated]"
+                memory = memory[: self.memory_section_max_chars - len(suffix)] + suffix
+            sections["memory"] = f"# Memory\n\n{memory}"
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+                sections["always_skills"] = f"# Active Skills\n\n{always_content}"
+        if skill_names:
+            requested_content = self.skills.load_skills_for_context(skill_names)
+            if requested_content:
+                sections["requested_skills"] = f"# Requested Skills\n\n{requested_content}"
 
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""# Skills
+            sections["skills_summary"] = f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
-{skills_summary}""")
+{skills_summary}"""
 
-        return "\n\n---\n\n".join(parts)
-    
+        if self.workflow_summary_callback:
+            try:
+                workflow_summary = self.workflow_summary_callback()
+                if workflow_summary:
+                    sections["workflow"] = f"# Registered Workflows\n\n{workflow_summary}"
+            except Exception:
+                pass
+        if self.mcp_guidance:
+            guidance_parts = []
+            for server_name, text in self.mcp_guidance.items():
+                if text and text.strip():
+                    guidance_parts.append(f"### {server_name}\n\n{text.strip()}")
+            if guidance_parts:
+                sections["mcp_guidance"] = "# MCP tool guidance\n\n" + "\n\n".join(guidance_parts)
+        if self.computer_use_guidance and self.computer_use_guidance.strip():
+            sections["computer_use_guidance"] = self.computer_use_guidance.strip()
+        return sections
+
+    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+        """Build the system prompt. Section order follows section_order if set, else DEFAULT_SECTION_ORDER."""
+        order = self.section_order if self.section_order else DEFAULT_SECTION_ORDER
+        sections = self._build_section_contents(skill_names)
+        parts = [sections[name] for name in order if name in sections]
+        sep = "\n\n---\n\n"
+        result = sep.join(parts)
+        if self.system_prompt_max_chars > 0 and len(result) > self.system_prompt_max_chars:
+            while len(parts) > 1 and len(result) > self.system_prompt_max_chars:
+                parts.pop()
+                result = sep.join(parts)
+        return result
+
+    def get_system_blocks(self, skill_names: list[str] | None = None) -> list[dict[str, str]]:
+        """Return the system prompt as a list of blocks for providers that support multiple system messages."""
+        order = self.section_order if self.section_order else DEFAULT_SECTION_ORDER
+        sections = self._build_section_contents(skill_names)
+        return [{"role": "system", "content": sections[name]} for name in order if name in sections]
+
     def _get_identity(self) -> str:
         """Get the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
@@ -112,12 +192,24 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
-            *history,
-            {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
-            {"role": "user", "content": self._build_user_content(current_message, media)},
-        ]
+        messages = []
+        system_prompt = self.build_system_prompt(skill_names)
+        if channel and chat_id:
+            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+        messages.append({"role": "system", "content": system_prompt})
+        if self.history_max_chars > 0 and history:
+            total = 0
+            keep: list[dict[str, Any]] = []
+            for m in reversed(history):
+                total += len(str(m.get("content", "")))
+                if total > self.history_max_chars:
+                    break
+                keep.append(m)
+            history = list(reversed(keep))
+        messages.extend(history)
+        user_content = self._build_user_content(current_message, media)
+        messages.append({"role": "user", "content": user_content})
+        return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

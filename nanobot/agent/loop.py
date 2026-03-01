@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from loguru import logger
 
@@ -15,11 +16,27 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.desktop import (
+    SCREENSHOT_RESULT_PREFIX,
+    ClickImageTool,
+    GetForegroundWindowTool,
+    KeyboardTypeTool,
+    LaunchAppTool,
+    LocateOnScreenTool,
+    MouseClickTool,
+    MouseMoveTool,
+    MousePositionTool,
+    ScreenshotRegionTool,
+    ScreenshotTool,
+)
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.python_inline import RunPythonTool
+from nanobot.agent.tools.rag import RagIngestTool, SemanticSearchTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.system_stats import SystemStatsTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -27,8 +44,21 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ComputerUseConfig,
+        ExecToolConfig,
+        PythonInlineConfig,
+    )
     from nanobot.cron.service import CronService
+
+# Default text injected after a screenshot tool result (TOOLS.md/CUA).
+SCREENSHOT_FOLLOW_UP_TEXT = (
+    "Screenshot attached below. For taskbar, window previews, icons, or small/fiddly elements: "
+    "use screenshot_region then click_image (do not use overlay coordinates). "
+    "For other desktop clicks you may use the coordinate overlay to read (x,y) and mouse_click(x,y). "
+    "For in-browser targets prefer browser/UI tools (Playwright, cursor-ide-browser)."
+)
 
 
 class AgentLoop:
@@ -57,13 +87,25 @@ class AgentLoop:
         memory_window: int = 100,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
+        python_inline_config: PythonInlineConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        mcp_guidance: dict[str, str] | None = None,
+        tool_timeout_seconds: int = 0,
+        cua_auto_approve: bool = False,
+        screenshot_follow_up_text: str | None = None,
+        system_prompt_max_chars: int = 0,
+        memory_section_max_chars: int = 0,
+        section_order: list[str] | None = None,
+        history_max_chars: int = 0,
+        computer_use_config: ComputerUseConfig | None = None,
+        computer_use_confirm_callback: Callable[..., Awaitable[bool]] | None = None,
+        computer_use_api_key: str | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, PythonInlineConfig
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
@@ -75,10 +117,18 @@ class AgentLoop:
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
+        self.python_inline_config = python_inline_config if python_inline_config is not None else PythonInlineConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(
+            workspace,
+            mcp_guidance=mcp_guidance or {},
+            system_prompt_max_chars=system_prompt_max_chars,
+            memory_section_max_chars=memory_section_max_chars,
+            section_order=section_order if section_order else None,
+            history_max_chars=history_max_chars,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -90,12 +140,16 @@ class AgentLoop:
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
+            python_inline_config=self.python_inline_config,
             restrict_to_workspace=restrict_to_workspace,
         )
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
+        self._tool_timeout_seconds = tool_timeout_seconds if tool_timeout_seconds > 0 else 0
+        self._cua_auto_approve = cua_auto_approve
+        self._screenshot_follow_up_text = screenshot_follow_up_text.strip() if (screenshot_follow_up_text and screenshot_follow_up_text.strip()) else None
         self._mcp_connected = False
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
@@ -103,6 +157,9 @@ class AgentLoop:
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._computer_use_config = computer_use_config
+        self._computer_use_confirm_callback = computer_use_confirm_callback
+        self._computer_use_api_key = computer_use_api_key
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -114,7 +171,9 @@ class AgentLoop:
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
-            path_append=self.exec_config.path_append,
+            path_append=getattr(self.exec_config, "path_append", "") or "",
+            use_sandbox=getattr(self.exec_config, "use_sandbox", False),
+            sandbox_image=getattr(self.exec_config, "sandbox_image", "alpine:latest"),
         ))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
@@ -122,6 +181,174 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Inline Python (optional; safety check via ephemeral LLM when enabled)
+        if self.python_inline_config.enabled:
+            self.tools.register(RunPythonTool(
+                provider=self.provider,
+                workspace=self.workspace,
+                timeout=self.python_inline_config.timeout,
+                safety_check=self.python_inline_config.safety_check,
+                safety_model=self.python_inline_config.safety_model or "",
+                restrict_to_workspace=self.restrict_to_workspace,
+                skip_safety_when_cua_auto=self._cua_auto_approve,
+            ))
+
+        # Web tools
+        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+        self.tools.register(WebFetchTool())
+
+        # Message tool
+        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        self.tools.register(message_tool)
+
+        # Spawn tool (for subagents)
+        spawn_tool = SpawnTool(manager=self.subagents)
+        self.tools.register(spawn_tool)
+
+        # Cron tool (for scheduling)
+        if self.cron_service:
+            self.tools.register(CronTool(self.cron_service))
+
+        # System diagnostics (read-only)
+        self.tools.register(SystemStatsTool())
+
+        # Local RAG (optional: requires chromadb + sentence-transformers)
+        rag_dir = self.workspace / "data" / "chroma"
+        self.tools.register(SemanticSearchTool(persist_directory=rag_dir))
+        self.tools.register(RagIngestTool(persist_directory=rag_dir, allowed_dir=allowed_dir))
+
+        # Desktop automation (optional: requires pyautogui; policy "ask" by default)
+        self.tools.register(MouseMoveTool())
+        self.tools.register(MouseClickTool())
+        self.tools.register(MousePositionTool())
+        self.tools.register(KeyboardTypeTool())
+        self.tools.register(ScreenshotTool())
+        self.tools.register(ScreenshotRegionTool())
+        self.tools.register(LocateOnScreenTool())
+        self.tools.register(ClickImageTool())
+        self.tools.register(GetForegroundWindowTool())
+        self.tools.register(LaunchAppTool())
+
+        # Computer use (Gemini 3 Flash computer_use tool; optional)
+        if self._computer_use_config and getattr(self._computer_use_config, "enabled", False):
+            provider_name = (getattr(self._computer_use_config, "provider", None) or "").strip().lower()
+            if provider_name == "gemini":
+                api_key = (
+                    self._computer_use_api_key
+                    or getattr(self._computer_use_config, "api_key", None)
+                    or ""
+                ).strip() or None
+                if api_key:
+                    from nanobot.agent.computer_use.executor import ActionExecutor
+                    from nanobot.agent.computer_use.gemini_provider import GeminiComputerUseProvider
+                    from nanobot.agent.computer_use.outcome_store import ComputerUseOutcomeStore
+                    from nanobot.agent.tools.computer_use_tool import ComputerUseTool
+
+                    model = getattr(self._computer_use_config, "model", None) or "gemini-3-flash-preview"
+                    max_steps = max(1, getattr(self._computer_use_config, "max_steps_per_task", 15))
+                    dry_run = bool(getattr(self._computer_use_config, "dry_run", False))
+                    excluded = ["open_web_browser"] if getattr(self._computer_use_config, "exclude_open_web_browser", False) else None
+                    prefer_kb = getattr(self._computer_use_config, "prefer_keyboard_shortcuts", True)
+                    allow_multi = getattr(self._computer_use_config, "allow_multi_action_turn", True)
+                    use_cu_history = bool(getattr(self._computer_use_config, "use_conversation_history", False))
+                    cu_provider = GeminiComputerUseProvider(
+                        api_key=api_key,
+                        model=model,
+                        excluded_predefined_functions=excluded,
+                        prefer_keyboard_shortcuts=prefer_kb,
+                        allow_multi_action_turn=allow_multi,
+                        use_conversation_history=use_cu_history,
+                    )
+                    cu_executor = ActionExecutor(
+                        dry_run=dry_run,
+                        confirm_callback=self._computer_use_confirm_callback,
+                    )
+                    post_delay_ms = max(0, getattr(self._computer_use_config, "post_action_delay_ms", 400))
+                    learning = getattr(self._computer_use_config, "learning", None)
+                    cu_outcome_store = None
+                    if learning and getattr(learning, "enabled", False):
+                        ep_path = getattr(learning, "episodes_path", None) or "memory/computer_use_episodes.jsonl"
+                        max_hints = max(0, getattr(learning, "retrieval_max_hints", 3))
+                        cu_outcome_store = ComputerUseOutcomeStore(
+                            self.workspace,
+                            path=ep_path,
+                            retrieval_max_hints=max_hints,
+                        )
+                    use_internal_run_memory = bool(getattr(self._computer_use_config, "use_internal_run_memory", True))
+                    same_kind_exit = max(0, getattr(self._computer_use_config, "repetition_same_kind_exit_threshold", 5))
+                    same_kind_hint = max(1, getattr(self._computer_use_config, "repetition_same_kind_hint_threshold", 4))
+                    oscillation_window = max(0, getattr(self._computer_use_config, "repetition_oscillation_window", 0))
+                    self.tools.register(ComputerUseTool(
+                        provider=cu_provider,
+                        executor=cu_executor,
+                        max_steps=max_steps,
+                        post_action_delay_ms=post_delay_ms,
+                        use_conversation_history=use_cu_history,
+                        workspace=self.workspace,
+                        outcome_store=cu_outcome_store,
+                        use_internal_run_memory=use_internal_run_memory,
+                        repetition_same_kind_exit_threshold=same_kind_exit if same_kind_exit > 0 else 999,
+                        repetition_same_kind_hint_threshold=same_kind_hint,
+                        repetition_oscillation_window=oscillation_window,
+                    ))
+                    key_src = "GEMINI_API_KEY (env)" if (os.environ.get("GEMINI_API_KEY") or "").strip() else "config"
+                    logger.info(
+                        "Registered computer_use tool ({}). API key from {}. For desktop tasks prefer this over screenshot/mouse_click.",
+                        model,
+                        key_src,
+                    )
+                    try:
+                        if cu_provider.probe_api_key():
+                            logger.info("computer_use: API key verified (minimal request succeeded).")
+                        else:
+                            logger.warning(
+                                "computer_use: API key check returned 404. Key is set but the model may be unavailable for this key/region. "
+                                "Run from this environment: python scripts/test_gemini_computer_use.py"
+                            )
+                    except Exception as probe_err:
+                        logger.warning("computer_use: API key probe failed: {}", probe_err)
+                    self._set_computer_use_guidance()
+                else:
+                    logger.warning(
+                        "computer_use not registered: tools.computerUse.enabled is true but no API key. "
+                        "Set providers.gemini.apiKey or tools.computerUse.apiKey in config, or GEMINI_API_KEY."
+                    )
+            else:
+                logger.warning(
+                    "computer_use not registered: provider '{}' not supported (only 'gemini' is implemented).",
+                    provider_name or "(empty)",
+                )
+
+    def _set_computer_use_guidance(self) -> None:
+        """Inject system-prompt guidance so the agent prefers computer_use for desktop tasks."""
+        exclusive = getattr(self._computer_use_config, "exclusive_desktop", True)
+        atomic_rule = (
+            "**One computer_use call = one atomic task.** Never pass a numbered list (e.g. \"1. … 2. … 3. …\") or multiple sentences describing different steps in a single `task` string. "
+            "Plan the high-level steps in your reasoning, then execute each step with a **separate** computer_use call, using the result of each call to decide the next.\n\n"
+            "**Bad:** `computer_use(task=\"1. Switch to the browser and go to analytics.x.com. 2. Analyze Top Posts. 3. Report impressions.\")`\n\n"
+            "**Good:** First `computer_use(task=\"Switch to the browser and navigate to analytics.x.com\")`, then after that result `computer_use(task=\"Open or focus the Top Posts section for the last 28 days\")`, then `computer_use(task=\"Read the impressions from the chart and summarize\")` (one call per atomic step)."
+        )
+        if exclusive:
+            self.context.computer_use_guidance = (
+                "# Computer use (desktop UI)\n\n"
+                "All desktop actions (clicks, typing, scrolling, launching apps, etc.) must be done **only** via the **computer_use** tool. "
+                "Do not use any other tools for desktop interaction.\n\n"
+                + atomic_rule
+                + "\n\n"
+                "You can pass an optional **max_steps** for small sub-tasks (e.g. `computer_use(task=\"Click the Content tab\", max_steps=5)`). "
+                "computer_use captures the screen, asks a vision model for actions, and executes them until the task is done or the step limit is reached."
+            )
+        else:
+            self.context.computer_use_guidance = (
+                "# Computer use (desktop UI)\n\n"
+                "When the user asks you to do something on the desktop (e.g. open an app, type in a field, click something on screen), "
+                "**use the computer_use tool** with a single natural-language task. "
+                "Do **not** compose low-level steps yourself with screenshot, mouse_click, keyboard_type, or launch_app unless the user explicitly asks for that.\n\n"
+                + atomic_rule
+                + "\n\n"
+                "computer_use captures the screen, asks a vision model for actions, and executes them until the task is done or the step limit is reached."
+            )
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -191,6 +418,10 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
+            if response.finish_reason == "error":
+                final_content = response.content
+                break
+
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
@@ -218,10 +449,34 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
+                    try:
+                        if self._tool_timeout_seconds > 0:
+                            result = await asyncio.wait_for(
+                                self.tools.execute(tool_call.name, tool_call.arguments),
+                                timeout=self._tool_timeout_seconds,
+                            )
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    except asyncio.TimeoutError:
+                        result = f"Tool execution timed out after {self._tool_timeout_seconds} seconds."
+                    if tool_call.name == "screenshot" and result.startswith(SCREENSHOT_RESULT_PREFIX):
+                        b64 = result[len(SCREENSHOT_RESULT_PREFIX):]
+                        follow_up = self._screenshot_follow_up_text or SCREENSHOT_FOLLOW_UP_TEXT
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, follow_up
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                                {"type": "text", "text": follow_up},
+                            ],
+                        })
+                    else:
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 clean = self._strip_think(response.content)
                 messages = self.context.add_assistant_message(
@@ -250,7 +505,6 @@ class AgentLoop:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-
             if msg.content.strip().lower() == "/stop":
                 await self._handle_stop(msg)
             else:
@@ -314,28 +568,11 @@ class AgentLoop:
         self,
         msg: InboundMessage,
         session_key: str | None = None,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
-        # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
-            channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
-                                else ("cli", msg.chat_id))
-            logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.memory_window)
-            messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content, channel=channel, chat_id=chat_id,
-            )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
-            return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
-
+            return await self._process_system_message(msg)
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
@@ -422,21 +659,58 @@ class AgentLoop:
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
-
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
-
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
-
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},
+        )
+
+    async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
+        """
+        Process a system message (e.g., subagent announce).
+
+        The chat_id field contains "original_channel:original_chat_id" to route
+        the response back to the correct destination.
+        """
+        logger.info("Processing system message from {}", msg.sender_id)
+
+        # Parse origin from chat_id (format: "channel:chat_id")
+        if ":" in msg.chat_id:
+            parts = msg.chat_id.split(":", 1)
+            origin_channel = parts[0]
+            origin_chat_id = parts[1]
+        else:
+            # Fallback
+            origin_channel = "cli"
+            origin_chat_id = msg.chat_id
+
+        session_key = f"{origin_channel}:{origin_chat_id}"
+        session = self.sessions.get_or_create(session_key)
+        self._set_tool_context(origin_channel, origin_chat_id)
+        history = session.get_history(max_messages=self.memory_window)
+        initial_messages = self.context.build_messages(
+            history=history,
+            current_message=msg.content,
+            channel=origin_channel,
+            chat_id=origin_chat_id,
+        )
+        final_content, _, all_msgs = await self._run_agent_loop(initial_messages)
+        if final_content is None:
+            final_content = "Background task completed."
+        self._save_turn(session, all_msgs, 1 + len(history))
+        self.sessions.save(session)
+
+        return OutboundMessage(
+            channel=origin_channel,
+            chat_id=origin_chat_id,
+            content=final_content
         )
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:

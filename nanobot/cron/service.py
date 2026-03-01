@@ -313,21 +313,82 @@ class CronService:
         
         logger.info("Cron: added job '{}' ({})", name, job.id)
         return job
-    
-    def remove_job(self, job_id: str) -> bool:
-        """Remove a job by ID."""
+
+    def add_system_job(
+        self,
+        name: str,
+        schedule: CronSchedule,
+    ) -> CronJob:
+        """Add a system_event job (e.g. name='memory_sleep') that runs server-side logic, not an agent turn."""
         store = self._load_store()
+        now = _now_ms()
+        job = CronJob(
+            id=str(uuid.uuid4())[:8],
+            name=name,
+            enabled=True,
+            schedule=schedule,
+            payload=CronPayload(kind="system_event", message=""),
+            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
+            created_at_ms=now,
+            updated_at_ms=now,
+            delete_after_run=False,
+        )
+        store.jobs.append(job)
+        self._save_store()
+        self._arm_timer()
+        logger.info(f"Cron: added system job '{name}' ({job.id})")
+        return job
+
+    def get_system_job_by_name(self, name: str) -> CronJob | None:
+        """Return the first system_event job with the given name, or None. Also matches legacy kind 'memory_sleep' for name 'memory_sleep'."""
+        store = self._load_store()
+        for j in store.jobs:
+            if j.name != name:
+                continue
+            k = getattr(j.payload, "kind", None)
+            if k == "system_event" or (name == "memory_sleep" and k == "memory_sleep"):
+                return j
+        return None
+
+    def get_job(self, job_id: str) -> CronJob | None:
+        """Return the job with the given ID, or None."""
+        store = self._load_store()
+        for j in store.jobs:
+            if j.id == job_id:
+                return j
+        return None
+
+    def remove_job(self, job_id: str) -> bool:
+        """Remove a job by ID. Returns False for system_event jobs (they cannot be deleted)."""
+        store = self._load_store()
+        for j in store.jobs:
+            if j.id == job_id:
+                if getattr(j.payload, "kind", None) == "system_event":
+                    return False
+                break
         before = len(store.jobs)
         store.jobs = [j for j in store.jobs if j.id != job_id]
         removed = len(store.jobs) < before
-        
         if removed:
             self._save_store()
             self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
-        
         return removed
-    
+
+    def update_schedule(self, job_id: str, schedule: CronSchedule) -> CronJob | None:
+        """Update a job's schedule. Returns the updated job or None if not found."""
+        store = self._load_store()
+        for job in store.jobs:
+            if job.id == job_id:
+                job.schedule = schedule
+                job.updated_at_ms = _now_ms()
+                if job.enabled:
+                    job.state.next_run_at_ms = _compute_next_run(schedule, _now_ms())
+                self._save_store()
+                self._arm_timer()
+                return job
+        return None
+
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
         """Enable or disable a job."""
         store = self._load_store()

@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.utils.helpers import ensure_dir, safe_filename
+from nanobot.utils.helpers import safe_filename, get_sessions_path
 
 
 @dataclass
@@ -32,7 +32,7 @@ class Session:
     last_consolidated: int = 0  # Number of messages already consolidated to files
     
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
-        """Add a message to the session."""
+        """Add a message to the session. For assistant messages, pass blocks=... to persist the full timeline (thinking, tool_call, approval_request, content)."""
         msg = {
             "role": role,
             "content": content,
@@ -68,6 +68,11 @@ class Session:
         self.last_consolidated = 0
         self.updated_at = datetime.now()
 
+    def truncate_to(self, index: int) -> None:
+        """Remove all messages from index onward (exclusive), keeping messages[:index]."""
+        self.messages = self.messages[:index]
+        self.updated_at = datetime.now()
+
 
 class SessionManager:
     """
@@ -78,7 +83,7 @@ class SessionManager:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
+        self.sessions_dir = get_sessions_path()
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
     
@@ -181,6 +186,13 @@ class SessionManager:
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
+
+    def delete(self, key: str) -> None:
+        """Permanently delete a session (removes the JSONL file from disk and cache)."""
+        self._cache.pop(key, None)
+        path = self._get_session_path(key)
+        if path.exists():
+            path.unlink()
     
     def list_sessions(self) -> list[dict[str, Any]]:
         """
