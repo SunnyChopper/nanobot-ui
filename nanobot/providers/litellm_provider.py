@@ -332,6 +332,7 @@ class LiteLLMProvider(LLMProvider):
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
+
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None
 

@@ -3,8 +3,8 @@
 import os
 import re
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 _windows_dpi_aware_done = False
 

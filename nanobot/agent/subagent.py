@@ -18,6 +18,7 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 
 
@@ -80,6 +81,7 @@ class SubagentManager:
                     del self._session_tasks[session_key]
 
         bg_task.add_done_callback(_cleanup)
+
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
@@ -92,6 +94,7 @@ class SubagentManager:
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+
         try:
             # Build subagent tools (no message tool, no spawn tool)
             tools = ToolRegistry()
@@ -178,6 +181,7 @@ class SubagentManager:
 
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
+
             logger.info("Subagent [{}] completed successfully", task_id)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 

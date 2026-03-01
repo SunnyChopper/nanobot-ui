@@ -15,7 +15,6 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import DiscordConfig
 from nanobot.utils.helpers import get_data_path
 
-
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
 MAX_MESSAGE_LEN = 2000  # Discord message character limit
