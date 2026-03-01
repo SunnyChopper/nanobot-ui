@@ -443,6 +443,12 @@ export function SettingsPage() {
   const [kgDedupModel, setKgDedupModel] = useState('')
   const [kgDedupLlmBatchSize, setKgDedupLlmBatchSize] = useState(20)
   const [kgDedupBatchSize, setKgDedupBatchSize] = useState(256)
+  /** Explicit provider override from config (agent.provider): 'auto' or provider id. */
+  const [providerOverride, setProviderOverride] = useState('auto')
+  /** Thinking mode (agent.reasoning_effort): null = off, 'low' | 'medium' | 'high'. */
+  const [reasoningEffort, setReasoningEffort] = useState<string | null>(null)
+  /** PATH suffix for shell/exec (tools.exec.path_append). */
+  const [pathAppend, setPathAppend] = useState('')
   /** Per-server status: loading | result | null (fetch error). Servers shown immediately; each card updates when its request completes. */
   const [mcpStatusPerServer, setMcpStatusPerServer] = useState<
     Record<string, McpServerStatus | 'loading' | null>
@@ -466,8 +472,11 @@ export function SettingsPage() {
         setTemperature(cfg.agent.temperature)
         setMaxToolIter(cfg.agent.max_tool_iterations)
         setMemoryWindow(cfg.agent.memory_window)
+        setProviderOverride(cfg.agent.provider ?? 'auto')
+        setReasoningEffort(cfg.agent.reasoning_effort ?? null)
         setRestrictToWorkspace(cfg.tools.restrict_to_workspace)
         setExecTimeout(cfg.tools.exec_timeout)
+        setPathAppend(cfg.tools.path_append ?? '')
         setToolPolicy(cfg.tools.tool_policy)
         setCuaAutoApprove(cfg.tools.cua_auto_approve ?? false)
         setMcpGuidance(cfg.tools.mcp_guidance ?? {})
@@ -554,6 +563,8 @@ export function SettingsPage() {
           temperature,
           max_tool_iterations: maxToolIter,
           memory_window: memoryWindow,
+          provider: providerOverride,
+          reasoning_effort: reasoningEffort || null,
         },
         ...(Object.keys(providersPatch).length > 0 ? { providers: providersPatch } : {}),
         kg_dedup: {
@@ -565,6 +576,7 @@ export function SettingsPage() {
         },
         restrict_to_workspace: restrictToWorkspace,
         exec_timeout: execTimeout,
+        exec_path_append: pathAppend,
         ...(webSearchKey ? { web_search_api_key: webSearchKey } : {}),
         ...(Object.keys(mcpPatch).length > 0 ? { mcp_servers: mcpPatch } : {}),
         mcp_guidance: mcpGuidance,
@@ -579,6 +591,9 @@ export function SettingsPage() {
         getProviders().catch(() => ({ providers: availableProviders })),
       ])
       setConfig(cfg)
+      setProviderOverride(cfg.agent.provider ?? 'auto')
+      setReasoningEffort(cfg.agent.reasoning_effort ?? null)
+      setPathAppend(cfg.tools.path_append ?? '')
       setToolPolicy(cfg.tools.tool_policy)
       setCuaAutoApprove(cfg.tools.cua_auto_approve ?? false)
       setMcpGuidance(cfg.tools.mcp_guidance ?? {})
@@ -676,6 +691,43 @@ export function SettingsPage() {
                 models={availableModels}
                 providerFilter={selectedProvider || undefined}
               />
+            </Field>
+            <Field
+              label="Provider override"
+              hint="Force a specific provider or Auto to detect from model."
+            >
+              <select
+                className={inputCls}
+                value={providerOverride}
+                onChange={(e) => setProviderOverride(e.target.value)}
+                aria-label="Provider override"
+              >
+                <option value="auto">Auto (from model)</option>
+                {(availableProviders.length > 0 ? availableProviders : FALLBACK_PROVIDER_LIST).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field
+              label="Thinking mode"
+              hint="Enable extended reasoning for supported models (e.g. Claude, DeepSeek). Off disables."
+            >
+              <select
+                className={inputCls}
+                value={reasoningEffort ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setReasoningEffort(v === '' ? null : v)
+                }}
+                aria-label="Thinking mode"
+              >
+                <option value="">Off</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
             </Field>
 
             {/* Profiler: test connection and stream metrics */}
@@ -959,6 +1011,18 @@ export function SettingsPage() {
                 min={5}
                 max={600}
                 onChange={(e) => setExecTimeout(Number(e.target.value))}
+              />
+            </Field>
+            <Field
+              label="PATH append (for shell/exec)"
+              hint="Optional path suffix for subprocess PATH (e.g. /opt/bin)."
+            >
+              <input
+                type="text"
+                className={inputCls}
+                value={pathAppend}
+                onChange={(e) => setPathAppend(e.target.value)}
+                placeholder=""
               />
             </Field>
             <Field

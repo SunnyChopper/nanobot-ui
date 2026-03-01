@@ -134,6 +134,10 @@ export interface AgentConfigResponse {
   max_tool_iterations: number
   memory_window: number
   workspace: string
+  /** low / medium / high for thinking mode; null when off. */
+  reasoning_effort?: string | null
+  /** Provider name or 'auto' for auto-detection from model. */
+  provider?: string
 }
 
 export interface ToolsConfigResponse {
@@ -147,6 +151,8 @@ export interface ToolsConfigResponse {
   cua_auto_approve?: boolean
   /** Model for CUA run_python safety check (e.g. llama-3.1-8b-instant). */
   cua_safety_model?: string
+  /** PATH suffix for shell/exec subprocess (e.g. /opt/bin). */
+  path_append?: string
 }
 
 export interface MCPServerConfigResponse {
@@ -196,6 +202,8 @@ export interface AgentConfigPatch {
   max_tool_iterations?: number
   memory_window?: number
   workspace?: string
+  reasoning_effort?: string | null
+  provider?: string
 }
 
 export interface MCPServerPatch {
@@ -232,6 +240,8 @@ export interface ConfigPatch {
   /** When true, desktop tools and safe run_python (Groq-validated) are auto-approved. */
   cua_auto_approve?: boolean
   cua_safety_model?: string
+  /** PATH suffix for shell/exec subprocess (e.g. /opt/bin). */
+  exec_path_append?: string
 }
 
 export interface AllowlistEntry {
