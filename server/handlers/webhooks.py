@@ -102,6 +102,7 @@ async def webhook_trigger(
                 api_key=api_key,
                 api_base=api_base,
                 extra_headers=extra_headers,
+                reasoning_effort=getattr(config.agents.defaults, "reasoning_effort", None),
                 tool_policy=dict(config.tools.tool_policy),
                 request_approval=deny_approval,
                 max_llm_retries=getattr(

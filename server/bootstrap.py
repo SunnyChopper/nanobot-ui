@@ -150,6 +150,7 @@ def bootstrap() -> tuple[
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
+        reasoning_effort=getattr(config.agents.defaults, "reasoning_effort", None),
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         python_inline_config=config.tools.python_inline,

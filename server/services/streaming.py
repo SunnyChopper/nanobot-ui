@@ -132,6 +132,7 @@ async def stream_agent_loop(params: StreamAgentLoopParams) -> StreamAgentLoopRes
     api_key = params.api_key
     api_base = params.api_base
     extra_headers = params.extra_headers
+    reasoning_effort = getattr(params, "reasoning_effort", None)
     tool_policy = params.tool_policy
     request_approval = params.request_approval
     generate_approval_title = params.generate_approval_title
@@ -235,6 +236,8 @@ async def stream_agent_loop(params: StreamAgentLoopParams) -> StreamAgentLoopRes
                 kwargs["api_base"] = api_base
             if extra_headers:
                 kwargs["extra_headers"] = extra_headers
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
 
             tool_defs = tool_registry.get_definitions()
             if tool_defs:

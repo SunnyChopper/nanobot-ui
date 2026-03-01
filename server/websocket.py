@@ -240,6 +240,7 @@ async def websocket_endpoint(
                     api_key=api_key,
                     api_base=api_base,
                     extra_headers=extra_headers,
+                    reasoning_effort=getattr(config.agents.defaults, "reasoning_effort", None),
                     tool_policy=dict(config.tools.tool_policy),
                     request_approval=approval_callback,
                     generate_approval_title=generate_approval_title,
@@ -353,6 +354,12 @@ async def websocket_endpoint(
                     except (asyncio.CancelledError, Exception):
                         pass
                     current_stream_task = None
+                if agent is not None:
+                    session_key = f"web:{active_session_id}"
+                    try:
+                        await agent.subagents.cancel_by_session(session_key)
+                    except Exception as e:
+                        logger.debug(f"Subagent cancel on interrupt: {e}")
                 await send_event({
                     "type": "interrupt_ack",
                     "session_id": active_session_id,

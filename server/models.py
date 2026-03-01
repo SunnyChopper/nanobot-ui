@@ -185,6 +185,8 @@ class StreamAgentLoopParams(BaseModel):
     api_key: str | None = None
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None
+    reasoning_effort: str | None = None
+    """low / medium / high for thinking-capable models."""
 
     # Tool policy / approval
     tool_policy: dict[str, str] | None = None
@@ -476,6 +478,10 @@ class AgentConfigResponse(BaseModel):
     memory_window: int
     workspace: str
     """Raw workspace path (may contain ~ or relative refs)."""
+    reasoning_effort: str | None = None
+    """low / medium / high — enables LLM thinking mode for supported models."""
+    provider: str = "auto"
+    """Provider name (e.g. anthropic, openrouter) or 'auto' for auto-detection from model."""
 
 
 class ToolsConfigResponse(BaseModel):
@@ -491,6 +497,8 @@ class ToolsConfigResponse(BaseModel):
     """When True, desktop tools and safe run_python (validated by Groq) are auto-approved."""
     cua_safety_model: str = "llama-3.1-8b-instant"
     """Per-MCP-server guidance (server name → markdown). Injected into agent system prompt."""
+    path_append: str = ""
+    """PATH suffix for shell/exec subprocess (e.g. /opt/bin)."""
 
 
 class ProviderConfigResponse(BaseModel):
@@ -534,6 +542,10 @@ class AgentConfigPatch(BaseModel):
     memory_window: int | None = None
     workspace: str | None = None
     """Raw workspace path. Takes effect on next server restart."""
+    reasoning_effort: str | None = None
+    """low / medium / high for thinking mode; null or omit to disable."""
+    provider: str | None = None
+    """Provider name or 'auto' for auto-detection from model."""
 
 
 class MCPServerPatch(BaseModel):
@@ -606,6 +618,8 @@ class ConfigPatch(BaseModel):
     """When True, desktop tools and safe run_python (Groq-validated) are auto-approved."""
     cua_safety_model: str | None = None
     """Model for CUA run_python safety check (e.g. llama-3.1-8b-instant)."""
+    exec_path_append: str | None = None
+    """PATH suffix for shell/exec subprocess (e.g. /opt/bin)."""
 
 
 # ---------------------------------------------------------------------------

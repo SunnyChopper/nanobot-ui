@@ -152,6 +152,8 @@ async def get_config(request: Request, auth_user: object) -> ConfigResponse:
             max_tool_iterations=d.max_tool_iterations,
             memory_window=d.memory_window,
             workspace=d.workspace,
+            reasoning_effort=getattr(d, "reasoning_effort", None),
+            provider=getattr(d, "provider", "auto"),
         ),
         tools=ToolsConfigResponse(
             restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -161,6 +163,7 @@ async def get_config(request: Request, auth_user: object) -> ConfigResponse:
             mcp_guidance=getattr(config.tools, "mcp_guidance", None) or {},
             cua_auto_approve=getattr(config.tools, "cua_auto_approve", False),
             cua_safety_model=getattr(config.tools, "cua_safety_model", "") or "llama-3.1-8b-instant",
+            path_append=getattr(config.tools.exec, "path_append", "") or "",
         ),
         kg_dedup=kg_dedup,
         mcp_servers=mcp,
@@ -190,6 +193,10 @@ async def patch_config(
             d.memory_window = body.agent.memory_window
         if body.agent.workspace is not None:
             d.workspace = body.agent.workspace
+        if body.agent.reasoning_effort is not None:
+            d.reasoning_effort = body.agent.reasoning_effort if body.agent.reasoning_effort else None
+        if body.agent.provider is not None:
+            d.provider = body.agent.provider
 
     if body.providers is not None:
         for name, patch in body.providers.items():
@@ -206,6 +213,9 @@ async def patch_config(
 
     if body.exec_timeout is not None:
         config.tools.exec.timeout = body.exec_timeout
+
+    if body.exec_path_append is not None:
+        config.tools.exec.path_append = body.exec_path_append or ""
 
     if body.web_search_api_key is not None:
         config.tools.web.search.api_key = body.web_search_api_key
