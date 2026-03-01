@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -85,6 +86,7 @@ class AgentLoop:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         memory_window: int = 100,
+        reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         python_inline_config: PythonInlineConfig | None = None,
@@ -115,6 +117,7 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
+        self.reasoning_effort = reasoning_effort
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.python_inline_config = python_inline_config if python_inline_config is not None else PythonInlineConfig()
@@ -138,6 +141,7 @@ class AgentLoop:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            reasoning_effort=reasoning_effort,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             python_inline_config=self.python_inline_config,
@@ -154,7 +158,7 @@ class AgentLoop:
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
-        self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._computer_use_config = computer_use_config
@@ -390,7 +394,8 @@ class AgentLoop:
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
+            val = next(iter(args.values()), None) if isinstance(args, dict) else None
             if not isinstance(val, str):
                 return tc.name
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
@@ -416,6 +421,7 @@ class AgentLoop:
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                reasoning_effort=self.reasoning_effort,
             )
 
             if response.finish_reason == "error":
@@ -443,6 +449,7 @@ class AgentLoop:
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
                 )
 
                 for tool_call in response.tool_calls:
@@ -479,8 +486,15 @@ class AgentLoop:
                 messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 clean = self._strip_think(response.content)
+                # Don't persist error responses to session history — they can
+                # poison the context and cause permanent 400 loops (#1303).
+                if response.finish_reason == "error":
+                    logger.error("LLM returned error: {}", (clean or "")[:200])
+                    final_content = clean or "Sorry, I encountered an error calling the AI model."
+                    break
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
+                    thinking_blocks=response.thinking_blocks,
                 )
                 final_content = clean
                 break
@@ -603,8 +617,6 @@ class AgentLoop:
                 )
             finally:
                 self._consolidating.discard(session.key)
-                if not lock.locked():
-                    self._consolidation_locks.pop(session.key, None)
 
             session.clear()
             self.sessions.save(session)
@@ -626,8 +638,6 @@ class AgentLoop:
                         await self._consolidate_memory(session)
                 finally:
                     self._consolidating.discard(session.key)
-                    if not lock.locked():
-                        self._consolidation_locks.pop(session.key, None)
                     _task = asyncio.current_task()
                     if _task is not None:
                         self._consolidation_tasks.discard(_task)
@@ -717,8 +727,10 @@ class AgentLoop:
         """Save new-turn messages into session, truncating large tool results."""
         from datetime import datetime
         for m in messages[skip:]:
-            entry = {k: v for k, v in m.items() if k != "reasoning_content"}
+            entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
+            if role == "assistant" and not content and not entry.get("tool_calls"):
+                continue  # skip empty assistant messages — they poison session context
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
