@@ -1,0 +1,64 @@
+name: bridge-ci
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/**'
+      - '.github/workflows/bridge-ci.yml'
+  push:
+    paths:
+      - 'bridge/**'
+      - '.github/workflows/bridge-ci.yml'
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke
+        run: npm run smoke
+
+      - name: Audit
+        run: npm audit --audit-level=high
+
+      - name: Exact dependency pins
+        run: |
+          node --input-type=module -e '
+          import { readFileSync } from "node:fs";
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const bad = [];
+          for (const section of ["dependencies", "devDependencies"]) {
+            for (const [name, version] of Object.entries(pkg[section] ?? {})) {
+              if (typeof version === "string" && /^[\^~]/.test(version)) {
+                bad.push(`${section}.${name}@${version}`);
+              }
+            }
+          }
+          if (bad.length) {
+            console.error("dependency versions must be exact pins:");
+            console.error(bad.join("\n"));
+            process.exit(1);
+          }
+          console.log("exact pins ok");
+          '
