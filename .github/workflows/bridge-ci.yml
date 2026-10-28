@@ -1,5 +1,8 @@
 name: bridge-ci
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     paths:
